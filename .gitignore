@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+quick_test_sa.py
+quick_test_aco.py
+.DS_Store
+.venv
+.idea
