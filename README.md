@@ -35,6 +35,7 @@ TSP is an **NP-hard** combinatorial optimization problem and is widely used to b
 
 ## 📁 Project Structure
 
+```text
 .
 ├── aco_tsp.py            # Ant Colony Optimization (ACO)
 ├── sa_tsp.py             # Simulated Annealing (SA)
@@ -49,6 +50,7 @@ TSP is an **NP-hard** combinatorial optimization problem and is widely used to b
 │   ├── tsp_medium.json   # n = 50
 │   └── tsp_large.json    # n = 150
 └── README.md
+```
 
 ---
 
