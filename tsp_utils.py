@@ -1,9 +1,22 @@
 import math
 import itertools
+import json
 from typing import List, Tuple
 
 Point = Tuple[float, float]  # (x, y)
 Tour = List[int]             # [0, 3, 1, 2, ...]
+
+def load_instance(path: str):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data["points"], data.get("optimal_length", None)
+    except FileNotFoundError:
+        print(f"Error: File {path} not found")
+        return None, None
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON in {path}")
+        return None, None
 
 
 def euclidean_distance(p1: Point, p2: Point) -> float:
@@ -60,3 +73,24 @@ def brute_force_tsp_opt(points: List[Point]) -> Tuple[Tour, float]:
             best_tour = tour
 
     return best_tour, best_length
+
+# ~~~~~~~~~~~~~~~~~~~~~~ 2 OPT ~~~~~~~~~~~~~~~~~~~~~~
+def two_opt_delta(tour: Tour, dist: List[List[float]], i: int, j: int) -> float:
+    """
+    2-opt segment reversal cost difference (O(1)).
+    """
+    n = len(tour)
+
+    a = tour[(i - 1) % n]
+    b = tour[i]
+    c = tour[j - 1]
+    d = tour[j % n]
+
+    before = dist[a][b] + dist[c][d]
+    after = dist[a][c] + dist[b][d]
+    return after - before
+
+
+def apply_two_opt_inplace(tour: Tour, i: int, j: int) -> None:
+    """Reverse tour[i:j] (in-place)"""
+    tour[i:j] = reversed(tour[i:j])

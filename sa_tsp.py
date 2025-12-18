@@ -2,7 +2,7 @@ import random
 import math
 import time
 from typing import List, Tuple, Optional
-from tsp_utils import compute_distance_matrix, tour_length, Tour, Point
+from tsp_utils import compute_distance_matrix, two_opt_delta, apply_two_opt_inplace, tour_length, Tour, Point
 
 
 class SAParams:
@@ -27,32 +27,12 @@ def random_tour(n: int) -> Tour:
     random.shuffle(tour)
     return tour
 
-
-def two_opt_delta(tour: Tour, dist: List[List[float]], i: int, j: int) -> float:
-    """
-    2-opt segment reversal cost difference (O(1)).
-    """
-    n = len(tour)
-
-    a = tour[(i - 1) % n]
-    b = tour[i]
-    c = tour[j - 1]
-    d = tour[j % n]
-
-    before = dist[a][b] + dist[c][d]
-    after = dist[a][c] + dist[b][d]
-    return after - before
-
-
-def apply_two_opt_inplace(tour: Tour, i: int, j: int) -> None:
-    """Reverse tour[i:j] (in-place)"""
-    tour[i:j] = reversed(tour[i:j])
-
-
 def run_sa(points: List[Point], params: SAParams) -> Tuple[Tour, float, float]:
     """
     Simulated Annealing
     """
+    t0 = time.perf_counter()
+
     if params.seed is not None:
         random.seed(params.seed)
 
@@ -68,15 +48,13 @@ def run_sa(points: List[Point], params: SAParams) -> Tuple[Tour, float, float]:
 
     t = params.initial_temp
 
-    t0 = time.perf_counter()
+
 
     while t > params.min_temp:
         for _ in range(params.iterations_per_temp):
-            i, j = sorted(random.sample(range(n), 2))
-
             # avoid tiny/no-op reversals
-            if j - i < 2:
-                continue
+            i = random.randint(0, n - 3)
+            j = random.randint(i + 2, n - 1)
 
             delta = two_opt_delta(current_tour, dist, i, j)
 

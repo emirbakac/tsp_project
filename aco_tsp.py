@@ -1,26 +1,37 @@
 import random
 import time
 from typing import List, Tuple, Optional
-from tsp_utils import compute_distance_matrix, tour_length, Tour, Point
+from multiprocessing import Pool, cpu_count
+from tsp_utils import (
+    compute_distance_matrix,
+    two_opt_delta,
+    apply_two_opt_inplace,
+    tour_length,
+    Tour,
+    Point
+)
 
 try:
     import numpy as np
 except ImportError:
     np = None
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 class ACOParams:
     def __init__(
         self,
-        num_ants: int = 30,
+        num_ants: int = 20,
         alpha: float = 1.0,        # pheromone influence
         beta: float = 3.0,         # heuristic influence (1/distance)
         rho: float = 0.2,          # evaporation rate
         q: float = 1.0,            # pheromone deposit constant
         tau0: float = 1.0,         # initial pheromone
         iterations: int = 200,
-        elitist: bool = True,      # reinforce global best only (stable)
-        seed: Optional[int] = 67
+        seed: Optional[int] = 67,
+        mp_threshold: int = 100,   # lower limit of points for multiprocessing
+        use_multiprocessing: Optional[bool] = None,
+        elite_interval: int = 5    # hybrid parameter
     ):
         self.num_ants = num_ants
         self.alpha = alpha
@@ -29,12 +40,36 @@ class ACOParams:
         self.q = q
         self.tau0 = tau0
         self.iterations = iterations
-        self.elitist = elitist
         self.seed = seed
+        self.mp_threshold = mp_threshold
+        self.use_multiprocessing = use_multiprocessing
+        self.elite_interval = elite_interval
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def _ant_worker(args):
+    (
+        start_city,
+        pheromone,
+        eta,
+        alpha,
+        beta,
+        dist,
+        seed
+    ) = args
+
+    if seed is not None:
+        random.seed(seed)
+
+    tour = _construct_tour(start_city, pheromone, eta, alpha, beta)
+    tour = two_opt_local_search(tour, dist, max_iters=30)
+    length = tour_length(tour, dist)
+
+    return tour, length
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def _build_eta(dist: List[List[float]]) -> List[List[float]]:
-    """Heuristic matrix eta[i][j] = 1 / dist[i][j] (0 on diagonal)."""
     n = len(dist)
     eta = [[0.0] * n for _ in range(n)]
     for i in range(n):
@@ -43,14 +78,11 @@ def _build_eta(dist: List[List[float]]) -> List[List[float]]:
                 eta[i][j] = 1.0 / dist[i][j]
     return eta
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def _roulette_choice(candidates: List[int], weights: List[float]) -> int:
-    """
-    Randomly pick an item from candidates proportional to weights.
-    """
     total = sum(weights)
     if total <= 0:
-        # fallback: uniform random
         return random.choice(candidates)
 
     r = random.uniform(0, total)
@@ -59,8 +91,9 @@ def _roulette_choice(candidates: List[int], weights: List[float]) -> int:
         cum += w
         if cum >= r:
             return c
-    return candidates[-1] # back-up
+    return candidates[-1]
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def _construct_tour(
     start: int,
@@ -69,9 +102,7 @@ def _construct_tour(
     alpha: float,
     beta: float
 ) -> Tour:
-    """
-    One ant builds one tour using probabilistic transition rule:
-    """
+
     n = len(pheromone)
     tour = [start]
     unvisited = set(range(n))
@@ -80,12 +111,10 @@ def _construct_tour(
     current = start
     while unvisited:
         candidates = list(unvisited)
-        weights = []
-        for j in candidates:
-            tau = pheromone[current][j] ** alpha
-            h = eta[current][j] ** beta
-            weights.append(tau * h)
-
+        weights = [
+            (pheromone[current][j] ** alpha) * (eta[current][j] ** beta)
+            for j in candidates
+        ]
         nxt = _roulette_choice(candidates, weights)
         tour.append(nxt)
         unvisited.remove(nxt)
@@ -93,20 +122,40 @@ def _construct_tour(
 
     return tour
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def two_opt_local_search(tour: Tour, dist: List[List[float]], max_iters: int = 50) -> Tour:
+    n = len(tour)
+    tour = tour[:]
+
+    for _ in range(max_iters):
+        improved = False
+        for i in range(n - 1):
+            for j in range(i + 2, n):
+                if two_opt_delta(tour, dist, i, j) < 0:
+                    apply_two_opt_inplace(tour, i, j)
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+
+    return tour
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def run_aco(points: List[Point], params: ACOParams) -> Tuple[Tour, float, float]:
-    """
-    Runs ACO on a TSP instance given by points.
-    """
+
+    t0 = time.perf_counter()
+
     if params.seed is not None:
         random.seed(params.seed)
 
     dist = compute_distance_matrix(points)
     eta = _build_eta(dist)
-
     n = len(points)
 
-    # initialize pheromone
     if np is not None:
         pheromone = np.full((n, n), params.tau0, dtype=float)
         np.fill_diagonal(pheromone, 0.0)
@@ -115,67 +164,84 @@ def run_aco(points: List[Point], params: ACOParams) -> Tuple[Tour, float, float]
         for i in range(n):
             pheromone[i][i] = 0.0
 
-    best_tour: Tour = list(range(n))
+    best_tour = None
     best_len = float("inf")
 
-    t0 = time.perf_counter()
+    if params.use_multiprocessing is not None:
+        use_mp = params.use_multiprocessing
+    else:
+        use_mp = (n >= params.mp_threshold)
 
-    for it in range(params.iterations):
-        all_tours: List[Tour] = []
-        all_lengths: List[float] = []
+    pool = Pool(processes=min(cpu_count(), params.num_ants)) if use_mp else None
 
-        # --- each ant constructs a tour ---
-        for k in range(params.num_ants):
-            start_city = random.randrange(n)
-            tour = _construct_tour(
-                start=start_city,
-                pheromone=pheromone,
-                eta=eta,
-                alpha=params.alpha,
-                beta=params.beta
-            )
-            length = tour_length(tour, dist)
+    try:
+        for it in range(params.iterations):
 
-            all_tours.append(tour)
-            all_lengths.append(length)
+            iter_best_tour = None
+            iter_best_len = float("inf")
 
-            if length < best_len:
-                best_len = length
-                best_tour = tour[:]
+            if use_mp:
+                starts = [random.randrange(n) for _ in range(params.num_ants)]
+                seeds = (
+                    [params.seed + it * 1000 + k for k in range(params.num_ants)]
+                    if params.seed is not None else
+                    [None] * params.num_ants
+                )
 
-        # --- evaporation ---
-        if np is not None:
+                args = [
+                    (starts[k], pheromone, eta, params.alpha, params.beta, dist, seeds[k])
+                    for k in range(params.num_ants)
+                ]
+
+                for tour, length in pool.map(_ant_worker, args):
+                    if length < iter_best_len:
+                        iter_best_len = length
+                        iter_best_tour = tour[:]
+                    if length < best_len:
+                        best_len = length
+                        best_tour = tour[:]
+
+            else:
+                for _ in range(params.num_ants):
+                    start = random.randrange(n)
+                    tour = _construct_tour(start, pheromone, eta, params.alpha, params.beta)
+                    tour = two_opt_local_search(tour, dist, max_iters=30)
+                    length = tour_length(tour, dist)
+
+                    if length < iter_best_len:
+                        iter_best_len = length
+                        iter_best_tour = tour[:]
+                    if length < best_len:
+                        best_len = length
+                        best_tour = tour[:]
+
+            if iter_best_tour is None:
+                continue
+
+            # Evaporation
             pheromone *= (1.0 - params.rho)
-            np.fill_diagonal(pheromone, 0.0)
-        else:
-            for i in range(n):
-                for j in range(n):
-                    if i != j:
-                        pheromone[i][j] *= (1.0 - params.rho)
+            if np is not None:
+                np.fill_diagonal(pheromone, 0.0)
 
-        # --- reinforcement ---
-        if params.elitist:
-            # add pheromone only for global best tour
-            deposit = params.q / best_len
+            # Hybrid Update
+            if it % params.elite_interval == 0:
+                source_tour = best_tour
+                source_len = best_len
+            else:
+                source_tour = iter_best_tour
+                source_len = iter_best_len
+
+            deposit = params.q / source_len
             for i in range(n):
-                a = best_tour[i]
-                b = best_tour[(i + 1) % n]
+                a = source_tour[i]
+                b = source_tour[(i + 1) % n]
                 pheromone[a][b] += deposit
                 pheromone[b][a] += deposit
-        else:
-            # elitist is true by default, I just wanted to demonstrate the implementation.
-            # deposit from all ants (more explorative)
-            for tour, length in zip(all_tours, all_lengths):
-                deposit = params.q / length
-                for i in range(n):
-                    a = tour[i]
-                    b = tour[(i + 1) % n]
-                    pheromone[a][b] += deposit
-                    pheromone[b][a] += deposit
 
-        # ~~~~~~ Debug ~~~~~~
-        # if (it + 1) % 20 == 0:
-        #     print(f"Iter {it+1}/{params.iterations} best_len={best_len:.2f}")
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     t1 = time.perf_counter()
     return best_tour, best_len, (t1 - t0)
